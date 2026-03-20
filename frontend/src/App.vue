@@ -1,12 +1,17 @@
 <template>
   <div class="app">
+    <ToastMessage />
+
     <header>
       <h1>📝 Todo App</h1>
       <p class="subtitle">Spring Boot + Vue3 + MySQL</p>
     </header>
 
     <main>
-      <!-- Add Todo -->
+      <!-- Stats Panel -->
+      <StatsPanel :stats="stats" />
+
+      <!-- Add Todo Form -->
       <div class="add-form">
         <input
           v-model="newTitle"
@@ -14,7 +19,21 @@
           placeholder="输入待办事项，按 Enter 添加..."
           class="todo-input"
         />
+        <select v-model="newPriority" class="priority-select">
+          <option :value="1">🔴 高</option>
+          <option :value="2">🟡 中</option>
+          <option :value="3">🟢 低</option>
+        </select>
         <button @click="addTodo" class="btn btn-primary">添加</button>
+      </div>
+
+      <!-- Search -->
+      <div class="search-bar">
+        <input
+          v-model="searchInput"
+          placeholder="搜索待办..."
+          class="todo-input search-input"
+        />
       </div>
 
       <!-- Filter Tabs -->
@@ -26,55 +45,77 @@
           @click="currentFilter = tab.value"
         >
           {{ tab.label }}
-          <span class="count">{{ getCount(tab.value) }}</span>
         </button>
       </div>
 
-      <!-- Loading -->
-      <div v-if="loading" class="loading">加载中...</div>
+      <!-- Skeleton Loading -->
+      <TodoSkeleton v-if="loading" />
 
       <!-- Error -->
-      <div v-if="error" class="error">{{ error }}</div>
+      <div v-else-if="error" class="error">{{ error }}</div>
 
       <!-- Todo List -->
-      <transition-group name="todo-list" tag="ul" class="todo-list">
-        <li
-          v-for="todo in filteredTodos"
-          :key="todo.id"
-          :class="['todo-item', { completed: todo.completed }]"
-        >
-          <input
-            type="checkbox"
-            :checked="todo.completed"
-            @change="toggleTodo(todo)"
-            class="todo-checkbox"
-          />
-          <span v-if="editingId !== todo.id" class="todo-title" @dblclick="startEdit(todo)">
-            {{ todo.title }}
-          </span>
-          <input
-            v-else
-            v-model="editTitle"
-            @keyup.enter="saveEdit(todo)"
-            @keyup.escape="cancelEdit"
-            @blur="saveEdit(todo)"
-            class="edit-input"
-            ref="editInput"
-          />
-          <span class="todo-date">{{ formatDate(todo.createdAt) }}</span>
-          <button @click="deleteTodo(todo.id)" class="btn btn-danger btn-sm">删除</button>
-        </li>
-      </transition-group>
+      <template v-else>
+        <transition-group name="todo-list" tag="ul" class="todo-list">
+          <li
+            v-for="todo in filteredTodos"
+            :key="todo.id"
+            :class="['todo-item', { completed: todo.completed }]"
+          >
+            <input
+              type="checkbox"
+              :checked="todo.completed"
+              @change="toggleTodo(todo)"
+              class="todo-checkbox"
+            />
+            <span
+              :class="['priority-badge', `priority-${todo.priority}`]"
+              :title="priorityLabel(todo.priority)"
+            >{{ priorityIcon(todo.priority) }}</span>
+            <span
+              v-if="editingId !== todo.id"
+              class="todo-title"
+              @dblclick="startEdit(todo)"
+            >{{ todo.title }}</span>
+            <input
+              v-else
+              v-model="editTitle"
+              @keyup.enter="saveEdit(todo)"
+              @keyup.escape="cancelEdit"
+              @blur="saveEdit(todo)"
+              class="edit-input"
+              ref="editInput"
+            />
+            <span class="todo-date">{{ formatDate(todo.createdAt) }}</span>
+            <button @click="deleteTodo(todo.id)" class="btn btn-danger btn-sm">删除</button>
+          </li>
+        </transition-group>
 
-      <!-- Empty State -->
-      <div v-if="!loading && filteredTodos.length === 0" class="empty-state">
-        <p>暂无待办事项 ✨</p>
+        <!-- Empty State -->
+        <div v-if="filteredTodos.length === 0" class="empty-state">
+          <p>暂无待办事项 ✨</p>
+        </div>
+      </template>
+
+      <!-- Pagination -->
+      <div v-if="totalPages > 1" class="pagination">
+        <button
+          class="btn btn-page"
+          :disabled="currentPage === 0"
+          @click="goToPage(currentPage - 1)"
+        >上一页</button>
+        <span class="page-info">第 {{ currentPage + 1 }} / {{ totalPages }} 页（共 {{ totalElements }} 条）</span>
+        <button
+          class="btn btn-page"
+          :disabled="currentPage >= totalPages - 1"
+          @click="goToPage(currentPage + 1)"
+        >下一页</button>
       </div>
 
-      <!-- Footer Stats -->
-      <div v-if="todos.length > 0" class="footer">
-        <span>共 {{ todos.length }} 项，已完成 {{ completedCount }} 项</span>
-        <button v-if="completedCount > 0" @click="clearCompleted" class="btn btn-link">
+      <!-- Footer -->
+      <div v-if="totalElements > 0" class="footer">
+        <span>共 {{ totalElements }} 项</span>
+        <button v-if="stats.completed > 0" @click="clearCompleted" class="btn btn-link">
           清除已完成
         </button>
       </div>
@@ -83,11 +124,20 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, nextTick } from 'vue'
-import axios from 'axios'
+import { ref, computed, watch, onMounted, nextTick } from 'vue'
+import { todoApi } from './api/todo.js'
+import { useToast } from './composables/useToast.js'
+import ToastMessage from './components/ToastMessage.vue'
+import TodoSkeleton from './components/TodoSkeleton.vue'
+import StatsPanel from './components/StatsPanel.vue'
 
+const toast = useToast()
+
+// State
 const todos = ref([])
+const stats = ref({ total: 0, completed: 0, active: 0, highPriority: 0 })
 const newTitle = ref('')
+const newPriority = ref(2)
 const loading = ref(false)
 const error = ref('')
 const currentFilter = ref('all')
@@ -95,13 +145,31 @@ const editingId = ref(null)
 const editTitle = ref('')
 const editInput = ref(null)
 
+// Pagination
+const currentPage = ref(0)
+const pageSize = ref(10)
+const totalElements = ref(0)
+const totalPages = ref(0)
+
+// Search with 400ms debounce
+const searchInput = ref('')
+const keyword = ref('')
+let debounceTimer = null
+watch(searchInput, (val) => {
+  clearTimeout(debounceTimer)
+  debounceTimer = setTimeout(() => {
+    keyword.value = val
+    currentPage.value = 0
+  }, 400)
+})
+
+watch([keyword, currentPage], fetchTodos)
+
 const tabs = [
   { label: '全部', value: 'all' },
   { label: '待完成', value: 'active' },
   { label: '已完成', value: 'completed' },
 ]
-
-const completedCount = computed(() => todos.value.filter((t) => t.completed).length)
 
 const filteredTodos = computed(() => {
   if (currentFilter.value === 'active') return todos.value.filter((t) => !t.completed)
@@ -109,10 +177,11 @@ const filteredTodos = computed(() => {
   return todos.value
 })
 
-function getCount(filter) {
-  if (filter === 'all') return todos.value.length
-  if (filter === 'active') return todos.value.filter((t) => !t.completed).length
-  return todos.value.filter((t) => t.completed).length
+function priorityIcon(p) {
+  return p === 1 ? '🔴' : p === 3 ? '🟢' : '🟡'
+}
+function priorityLabel(p) {
+  return p === 1 ? '高优先级' : p === 3 ? '低优先级' : '中优先级'
 }
 
 function formatDate(dateStr) {
@@ -124,12 +193,25 @@ async function fetchTodos() {
   loading.value = true
   error.value = ''
   try {
-    const res = await axios.get('/api/todos')
-    todos.value = res.data
+    const res = await todoApi.getPage(currentPage.value, pageSize.value, keyword.value)
+    const page = res.data
+    todos.value = page.content
+    totalElements.value = page.totalElements
+    totalPages.value = page.totalPages
+    await fetchStats()
   } catch (e) {
-    error.value = '获取数据失败，请检查后端服务是否启动'
+    error.value = e.message || '获取数据失败，请检查后端服务是否启动'
   } finally {
     loading.value = false
+  }
+}
+
+async function fetchStats() {
+  try {
+    const res = await todoApi.getStats()
+    stats.value = res.data
+  } catch {
+    // stats failure is non-critical
   }
 }
 
@@ -137,40 +219,51 @@ async function addTodo() {
   const title = newTitle.value.trim()
   if (!title) return
   try {
-    const res = await axios.post('/api/todos', { title })
-    todos.value.unshift(res.data)
+    await todoApi.create({ title, priority: newPriority.value })
     newTitle.value = ''
+    newPriority.value = 2
+    currentPage.value = 0
+    await fetchTodos()
+    toast.success('添加成功')
   } catch (e) {
-    error.value = '添加失败'
+    toast.error(e.message || '添加失败')
   }
 }
 
 async function toggleTodo(todo) {
   try {
-    const res = await axios.put(`/api/todos/${todo.id}`, {
+    await todoApi.update(todo.id, {
       title: todo.title,
       completed: !todo.completed,
+      priority: todo.priority,
     })
-    const index = todos.value.findIndex((t) => t.id === todo.id)
-    todos.value[index] = res.data
+    await fetchTodos()
+    toast.success(todo.completed ? '已标为未完成' : '已标为已完成')
   } catch (e) {
-    error.value = '更新失败'
+    toast.error(e.message || '更新失败')
   }
 }
 
 async function deleteTodo(id) {
   try {
-    await axios.delete(`/api/todos/${id}`)
-    todos.value = todos.value.filter((t) => t.id !== id)
+    await todoApi.remove(id)
+    await fetchTodos()
+    toast.success('已删除')
   } catch (e) {
-    error.value = '删除失败'
+    toast.error(e.message || '删除失败')
   }
 }
 
 async function clearCompleted() {
   const completed = todos.value.filter((t) => t.completed)
-  await Promise.all(completed.map((t) => axios.delete(`/api/todos/${t.id}`)))
-  todos.value = todos.value.filter((t) => !t.completed)
+  try {
+    await Promise.all(completed.map((t) => todoApi.remove(t.id)))
+    currentPage.value = 0
+    await fetchTodos()
+    toast.success(`已清除 ${completed.length} 条已完成事项`)
+  } catch (e) {
+    toast.error(e.message || '清除失败')
+  }
 }
 
 function startEdit(todo) {
@@ -188,22 +281,24 @@ function cancelEdit() {
 
 async function saveEdit(todo) {
   const title = editTitle.value.trim()
-  if (!title) {
-    cancelEdit()
-    return
-  }
+  if (!title) { cancelEdit(); return }
   try {
-    const res = await axios.put(`/api/todos/${todo.id}`, {
+    await todoApi.update(todo.id, {
       title,
       completed: todo.completed,
+      priority: todo.priority,
     })
-    const index = todos.value.findIndex((t) => t.id === todo.id)
-    todos.value[index] = res.data
+    await fetchTodos()
+    toast.success('已更新')
   } catch (e) {
-    error.value = '更新失败'
+    toast.error(e.message || '更新失败')
   } finally {
     cancelEdit()
   }
+}
+
+function goToPage(page) {
+  currentPage.value = page
 }
 
 onMounted(fetchTodos)
@@ -228,7 +323,7 @@ body {
 
 .app {
   width: 100%;
-  max-width: 600px;
+  max-width: 680px;
 }
 
 header {
@@ -259,7 +354,15 @@ main {
 .add-form {
   display: flex;
   gap: 8px;
-  margin-bottom: 20px;
+  margin-bottom: 12px;
+}
+
+.search-bar {
+  margin-bottom: 16px;
+}
+
+.search-input {
+  width: 100%;
 }
 
 .todo-input {
@@ -276,6 +379,20 @@ main {
   border-color: #667eea;
 }
 
+.priority-select {
+  padding: 10px 8px;
+  border: 2px solid #e2e8f0;
+  border-radius: 8px;
+  font-size: 0.9rem;
+  outline: none;
+  cursor: pointer;
+  background: white;
+}
+
+.priority-select:focus {
+  border-color: #667eea;
+}
+
 .btn {
   padding: 10px 20px;
   border: none;
@@ -289,6 +406,7 @@ main {
 .btn-primary {
   background: linear-gradient(135deg, #667eea, #764ba2);
   color: white;
+  white-space: nowrap;
 }
 
 .btn-primary:hover {
@@ -318,6 +436,22 @@ main {
   font-size: 0.9rem;
 }
 
+.btn-page {
+  padding: 6px 14px;
+  background: #edf2f7;
+  color: #4a5568;
+  font-size: 0.85rem;
+}
+
+.btn-page:hover:not(:disabled) {
+  background: #e2e8f0;
+}
+
+.btn-page:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
 .filter-tabs {
   display: flex;
   gap: 4px;
@@ -337,10 +471,6 @@ main {
   font-size: 0.9rem;
   color: #718096;
   transition: all 0.2s;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
 }
 
 .tab.active {
@@ -348,26 +478,6 @@ main {
   color: #667eea;
   font-weight: 600;
   box-shadow: 0 1px 4px rgba(0, 0, 0, 0.1);
-}
-
-.count {
-  background: #e2e8f0;
-  border-radius: 10px;
-  padding: 1px 7px;
-  font-size: 0.75rem;
-  min-width: 20px;
-  text-align: center;
-}
-
-.tab.active .count {
-  background: #667eea;
-  color: white;
-}
-
-.loading {
-  text-align: center;
-  color: #718096;
-  padding: 20px;
 }
 
 .error {
@@ -387,7 +497,7 @@ main {
 .todo-item {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 10px;
   padding: 14px 0;
   border-bottom: 1px solid #f0f0f0;
   transition: all 0.2s;
@@ -408,6 +518,12 @@ main {
   cursor: pointer;
   accent-color: #667eea;
   flex-shrink: 0;
+}
+
+.priority-badge {
+  font-size: 0.85rem;
+  flex-shrink: 0;
+  cursor: help;
 }
 
 .todo-title {
@@ -439,6 +555,21 @@ main {
   font-size: 1rem;
 }
 
+.pagination {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: 12px;
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px solid #e2e8f0;
+}
+
+.page-info {
+  font-size: 0.85rem;
+  color: #718096;
+}
+
 .footer {
   display: flex;
   justify-content: space-between;
@@ -464,5 +595,40 @@ main {
 .todo-list-leave-to {
   opacity: 0;
   transform: translateX(20px);
+}
+
+/* Responsive */
+@media (max-width: 768px) {
+  body {
+    padding: 20px 12px;
+  }
+
+  header h1 {
+    font-size: 1.8rem;
+  }
+
+  main {
+    padding: 16px;
+  }
+
+  .add-form {
+    flex-wrap: wrap;
+  }
+
+  .todo-input {
+    min-width: 0;
+  }
+
+  .priority-select {
+    flex-shrink: 0;
+  }
+
+  .btn-primary {
+    width: 100%;
+  }
+
+  .todo-date {
+    display: none;
+  }
 }
 </style>
