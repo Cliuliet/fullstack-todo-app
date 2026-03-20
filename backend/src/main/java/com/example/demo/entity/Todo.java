@@ -18,7 +18,7 @@ public class Todo {
     @Column(nullable = false)
     private boolean completed = false;
 
-    @Column(nullable = false)
+    @Column(nullable = false, columnDefinition = "INT NOT NULL DEFAULT 2")
     private int priority = 2;
 
     @Column(name = "created_at", nullable = false, updatable = false)
